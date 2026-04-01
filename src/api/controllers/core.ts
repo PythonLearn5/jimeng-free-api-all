@@ -4,16 +4,21 @@ import _ from "lodash";
 import mime from "mime";
 import axios, { AxiosRequestConfig, AxiosResponse } from "axios";
 
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 import APIException from "@/lib/exceptions/APIException.ts";
 import EX from "@/api/consts/exceptions.ts";
 import { createParser } from "eventsource-parser";
 import logger from "@/lib/logger.ts";
 import util from "@/lib/util.ts";
+import { signXBogus } from "@/lib/x-bogus.ts";
+import { getXGnarly } from "@/lib/x-gnarly.ts";
 
 // 模型名称
 const MODEL_NAME = "jimeng";
 // 默认的AgentID
 export const DEFAULT_ASSISTANT_ID = 513695;
+export const DEFAULT_ASSISTANT_ID_INTERNATIONAL = 513641;
 // 版本号
 const VERSION_CODE = "8.4.0";
 // 平台代码
@@ -28,6 +33,13 @@ export const USER_ID = util.uuid(false);
 const MAX_RETRY_COUNT = 3;
 // 重试延迟
 const RETRY_DELAY = 5000;
+const BASE_URL_CN = "https://jimeng.jianying.com";
+const BASE_URL_US_COMMERCE = "https://commerce.us.capcut.com";
+const BASE_URL_HK_COMMERCE = "https://commerce-api-sg.capcut.com";
+const BASE_URL_DREAMINA_US = "https://dreamina-api.us.capcut.com";
+const BASE_URL_DREAMINA_HK = "https://mweb-api-sg.capcut.com";
+const DA_VERSION = "3.3.9";
+const WEB_VERSION = "7.5.0";
 // 伪装headers
 const FAKE_HEADERS = {
   Accept: "application/json, text/plain, */*",
@@ -57,33 +69,92 @@ const FAKE_HEADERS = {
 // 文件最大大小
 const FILE_MAX_SIZE = 100 * 1024 * 1024;
 
-/**
- * 获取缓存中的access_token
- *
- * 目前jimeng的access_token是固定的，暂无刷新功能
- *
- * @param refreshToken 用于刷新access_token的refresh_token
- */
-export async function acquireToken(refreshToken: string): Promise<string> {
-  return refreshToken;
+// 支持的国际区域前缀 → (region, lan, loc) 映射
+const INTERNATIONAL_REGION_MAP: Record<string, { region: string; lan: string; loc: string }> = {
+  hk: { region: "HK", lan: "en", loc: "hk" },
+  jp: { region: "JP", lan: "ja", loc: "jp" },
+  sg: { region: "SG", lan: "en", loc: "sg" },
+  al: { region: "AL", lan: "en", loc: "al" },
+  az: { region: "AZ", lan: "en", loc: "az" },
+  bh: { region: "BH", lan: "en", loc: "bh" },
+  ca: { region: "CA", lan: "en", loc: "ca" },
+  cl: { region: "CL", lan: "en", loc: "cl" },
+  de: { region: "DE", lan: "en", loc: "de" },
+  gb: { region: "GB", lan: "en", loc: "gb" },
+  gy: { region: "GY", lan: "en", loc: "gy" },
+  il: { region: "IL", lan: "en", loc: "il" },
+  iq: { region: "IQ", lan: "en", loc: "iq" },
+  it: { region: "IT", lan: "en", loc: "it" },
+  jo: { region: "JO", lan: "en", loc: "jo" },
+  kg: { region: "KG", lan: "en", loc: "kg" },
+  om: { region: "OM", lan: "en", loc: "om" },
+  pk: { region: "PK", lan: "en", loc: "pk" },
+  pt: { region: "PT", lan: "en", loc: "pt" },
+  sa: { region: "SA", lan: "en", loc: "sa" },
+  se: { region: "SE", lan: "en", loc: "se" },
+  tr: { region: "TR", lan: "en", loc: "tr" },
+  tz: { region: "TZ", lan: "en", loc: "tz" },
+  uz: { region: "UZ", lan: "en", loc: "uz" },
+  ve: { region: "VE", lan: "en", loc: "ve" },
+  xk: { region: "XK", lan: "en", loc: "xk" },
+};
+
+export interface RegionInfo {
+  isUS: boolean;
+  regionCode: string; // 2-letter uppercase region code (CN for domestic, uppercase prefix for international)
+  isInternational: boolean;
+  isCN: boolean;
 }
 
-/**
- * 生成cookie
- */
+export interface TokenWithProxy {
+  token: string;
+  proxyUrl: string | null;
+}
+
+export function parseRegionFromToken(refreshToken: string): RegionInfo {
+  const token = refreshToken.toLowerCase();
+  const isUS = token.startsWith("us-");
+  // 尝试匹配 2 字母国际区域前缀 (xx-)
+  const prefixMatch = token.match(/^([a-z]{2})-/);
+  let regionCode = "CN";
+  let isInternational = false;
+  if (prefixMatch && INTERNATIONAL_REGION_MAP[prefixMatch[1]]) {
+    regionCode = INTERNATIONAL_REGION_MAP[prefixMatch[1]].region;
+    isInternational = true;
+  }
+  if (isUS) {
+    regionCode = "US";
+    isInternational = true;
+  }
+
+  return {
+    isUS,
+    regionCode,
+    isInternational,
+    isCN: !isInternational,
+  };
+}
+
+export function getAssistantId(regionInfo: RegionInfo): number {
+  if (regionInfo.isInternational) return DEFAULT_ASSISTANT_ID_INTERNATIONAL;
+  return DEFAULT_ASSISTANT_ID;
+}
+
 export function generateCookie(refreshToken: string) {
+  const regionInfo = parseRegionFromToken(refreshToken);
+  const token = regionInfo.isInternational ? refreshToken.substring(3) : refreshToken;
+
   return [
     `_tea_web_id=${WEB_ID}`,
     `is_staff_user=false`,
-    `store-region=cn-gd`,
-    `store-region-src=uid`,
-    `sid_guard=${refreshToken}%7C${util.unixTimestamp()}%7C5184000%7CMon%2C+03-Feb-2025+08%3A17%3A09+GMT`,
+    ...(regionInfo.isCN ? [`store-region=cn-gd`, `store-region-src=uid`] : []),
+    `sid_guard=${token}%7C${util.unixTimestamp()}%7C5184000%7CMon%2C+03-Feb-2025+08%3A17%3A09+GMT`,
     `uid_tt=${USER_ID}`,
     `uid_tt_ss=${USER_ID}`,
-    `sid_tt=${refreshToken}`,
-    `sessionid=${refreshToken}`,
-    `sessionid_ss=${refreshToken}`,
-    `sid_tt=${refreshToken}`
+    `sid_tt=${token}`,
+    `sessionid=${token}`,
+    `sessionid_ss=${token}`,
+    `sid_tt=${token}`
   ].join("; ");
 }
 
@@ -102,6 +173,26 @@ export function getCookiesForBrowser(refreshToken: string) {
     { name: "sid_tt", value: refreshToken, domain, path: "/" },
     { name: "sessionid", value: refreshToken, domain, path: "/" },
     { name: "sessionid_ss", value: refreshToken, domain, path: "/" },
+  ];
+}
+
+/**
+ * 获取国际版浏览器格式的cookie数组（用于Playwright context.addCookies）
+ */
+export function getCookiesForBrowserInternational(refreshToken: string) {
+  const regionInfo = parseRegionFromToken(refreshToken);
+  const token = regionInfo.isInternational ? refreshToken.substring(3) : refreshToken;
+  const domain = ".capcut.com";
+
+  return [
+    { name: "_tea_web_id", value: String(WEB_ID), domain, path: "/" },
+    { name: "is_staff_user", value: "false", domain, path: "/" },
+    { name: "uid_tt", value: USER_ID, domain, path: "/" },
+    { name: "uid_tt_ss", value: USER_ID, domain, path: "/" },
+    { name: "sid_tt", value: token, domain, path: "/" },
+    { name: "sessionid", value: token, domain, path: "/" },
+    { name: "sessionid_ss", value: token, domain, path: "/" },
+    { name: "sid_guard", value: `${token}%7C${util.unixTimestamp()}%7C5184000%7CMon%2C+03-Feb-2025+08%3A17%3A09+GMT`, domain, path: "/" },
   ];
 }
 
@@ -164,43 +255,92 @@ export async function request(
   refreshToken: string,
   options: AxiosRequestConfig = {}
 ) {
-  const token = await acquireToken(refreshToken);
+  const regionInfo = parseRegionFromToken(refreshToken);
+  const rawToken = regionInfo.isInternational ? refreshToken.substring(3) : refreshToken;
+  const token = await acquireToken(rawToken);
   const deviceTime = util.unixTimestamp();
   const sign = util.md5(
     `9e2c|${uri.slice(-7)}|${PLATFORM_CODE}|${VERSION_CODE}|${deviceTime}||11ac`
   );
-  
-  const fullUrl = `https://jimeng.jianying.com${uri}`;
+
+  let baseUrl = BASE_URL_CN;
+  let region = "cn";
+  let lan = "zh-Hans";
+  let loc = "cn";
+  if (regionInfo.isUS) {
+    baseUrl = uri.startsWith("/commerce/") ? BASE_URL_US_COMMERCE : BASE_URL_DREAMINA_US;
+    region = "US";
+    lan = "en";
+    loc = "us";
+  } else if (regionInfo.isInternational) {
+    const prefix = refreshToken.substring(0, 2).toLowerCase();
+    const regionCfg = INTERNATIONAL_REGION_MAP[prefix];
+    baseUrl = uri.startsWith("/commerce/") ? BASE_URL_HK_COMMERCE : BASE_URL_DREAMINA_HK;
+    region = regionCfg?.region || "HK";
+    lan = regionCfg?.lan || "en";
+    loc = regionCfg?.loc || "hk";
+  }
+
+  const origin = new URL(baseUrl).origin;
+  const fullUrl = `${baseUrl}${uri}`;
   const requestParams = {
-    aid: DEFAULT_ASSISTANT_ID,
+    aid: getAssistantId(regionInfo),
     device_platform: "web",
-    region: "cn",
-    webId: WEB_ID,
-    da_version: "3.3.2",
+    region,
+    ...(regionInfo.isInternational ? {} : { webId: WEB_ID }),
+    da_version: DA_VERSION,
+    os: "windows",
     web_component_open_flag: 1,
-    web_version: "7.5.0",
+    web_version: WEB_VERSION,
     aigc_features: "app_lip_sync",
     ...(options.params || {}),
   };
-  
+
   const headers = {
     ...FAKE_HEADERS,
-    Cookie: generateCookie(token),
+    Appid: getAssistantId(regionInfo),
+    Lan: lan,
+    Loc: loc,
+    Origin: origin,
+    Referer: origin,
+    Cookie: generateCookie(refreshToken),
     "Device-Time": deviceTime,
     Sign: sign,
     "Sign-Ver": "1",
+    Tdid: "",
     ...(options.headers || {}),
   };
-  
+
+  // 国际版请求：添加 X-Bogus / X-Gnarly 签名以通过 shark 安全验证
+  let signedParams = { ...requestParams };
+  let signedHeaders = { ...headers };
+  let signedUrl = fullUrl;
+  if (regionInfo.isInternational || regionInfo.isUS) {
+    const userAgent = FAKE_HEADERS["User-Agent"];
+    // 构建查询字符串用于签名（保持和 axios 序列化一致的顺序）
+    const qsParts = Object.entries(requestParams).map(([k, v]) => `${k}=${v}`);
+    const queryString = qsParts.join("&");
+    const bodyString = options.data ? JSON.stringify(options.data) : "";
+    // 生成 X-Bogus（直接拼到 URL，避免 axios URL 编码破坏自定义 base64 字符）
+    const signedQS = signXBogus(queryString, userAgent, bodyString);
+    signedUrl = `${baseUrl}${uri}?${signedQS}`;
+    // 不再通过 params 传递，改用直接拼 URL
+    signedParams = {};
+    // 生成 X-Gnarly（添加到请求头）
+    const xGnarly = getXGnarly(queryString, bodyString, userAgent);
+    signedHeaders["X-Gnarly"] = xGnarly;
+    logger.info(`已添加 X-Bogus 和 X-Gnarly 签名，URL: ${signedUrl.substring(0, 200)}`);
+  }
+
   logger.info(`发送请求: ${method.toUpperCase()} ${fullUrl}`);
-  logger.info(`请求参数: ${JSON.stringify(requestParams)}`);
+  logger.info(`请求参数: ${JSON.stringify(signedParams)}`);
   logger.info(`请求数据: ${JSON.stringify(options.data || {})}`);
-  
+
   // 添加重试逻辑
   let retries = 0;
   const maxRetries = 3; // 最大重试次数
   let lastError = null;
-  
+
   while (retries <= maxRetries) {
     try {
       if (retries > 0) {
@@ -208,12 +348,12 @@ export async function request(
         // 重试前等待一段时间
         await new Promise(resolve => setTimeout(resolve, 1000 * retries));
       }
-      
+
       const response = await axios.request({
         method,
-        url: fullUrl,
-        params: requestParams,
-        headers: headers,
+        url: signedUrl,
+        params: signedParams,
+        headers: signedHeaders,
         timeout: 45000, // 增加超时时间到45秒
         validateStatus: () => true, // 允许任何状态码
         ..._.omit(options, "params", "headers"),
@@ -433,6 +573,12 @@ export function checkResult(result: AxiosResponse) {
  */
 export function tokenSplit(authorization: string) {
   return authorization.replace("Bearer ", "").split(",");
+}
+
+export async function acquireToken(refreshToken: string) {
+  return parseRegionFromToken(refreshToken).isInternational
+    ? refreshToken.substring(3)
+    : refreshToken;
 }
 
 /**

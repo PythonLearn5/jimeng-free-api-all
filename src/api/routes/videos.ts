@@ -3,7 +3,7 @@ import _ from 'lodash';
 import Request from '@/lib/request/Request.ts';
 import Response from '@/lib/response/Response.ts';
 import { tokenSplit } from '@/api/controllers/core.ts';
-import { generateVideo, generateSeedanceVideo, isSeedanceModel, DEFAULT_MODEL, submitAsyncVideoTask, queryAsyncVideoTask } from '@/api/controllers/videos.ts';
+import { generateVideo, generateSeedanceVideo, generateInternationalSeedanceVideo, isSeedanceModel, isInternationalSeedanceModel, DEFAULT_MODEL, submitAsyncVideoTask, queryAsyncVideoTask, submitInternationalAsyncVideoTask } from '@/api/controllers/videos.ts';
 import util from '@/lib/util.ts';
 
 export default {
@@ -73,7 +73,9 @@ export default {
 
             // 根据模型类型选择不同的生成函数
             let videoUrl: string;
-            if (isSeedanceModel(model)) {
+            if (isInternationalSeedanceModel(model)) {
+                throw new Error('国际版 Seedance 请使用 /v1/videos/international/generations');
+            } else if (isSeedanceModel(model)) {
                 // Seedance 2.0 多图智能视频生成
                 // Seedance 默认时长为 4 秒，默认比例为 4:3
                 const seedanceDuration = finalDuration === 5 ? 4 : finalDuration; // 如果是默认的5秒，转为4秒
@@ -131,6 +133,146 @@ export default {
         },
 
         // ========== 异步视频生成接口：提交任务 ==========
+        '/international/generations': async (request: Request) => {
+            const contentType = request.headers['content-type'] || '';
+            const isMultiPart = contentType.startsWith('multipart/form-data');
+            const allowedModels = ['seedance-2.0-fast', 'seedance-2.0-pro', 'jimeng-video-seedance-2.0-fast', 'jimeng-video-seedance-2.0'];
+            const hasKeyedUrlFields = Object.keys(request.body || {}).some(key => (
+                key === 'image_file' || key === 'video_file' || key.startsWith('image_file_') || key.startsWith('video_file_')
+            ) && _.isString(request.body[key]));
+            const hasKeyedFiles = Object.keys(request.filesMap || {}).some(key =>
+                key === 'image_file' || key === 'video_file' || key.startsWith('image_file_') || key.startsWith('video_file_')
+            );
+
+            request
+                .validate('body.model', v => _.isString(v) && allowedModels.includes(v))
+                .validate('body.prompt', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.ratio', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.resolution', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.duration', v => {
+                    if (_.isUndefined(v)) return true;
+                    const num = isMultiPart && typeof v === 'string' ? parseInt(v) : v;
+                    return _.isFinite(num) && Number.isInteger(Number(num)) && num >= 4 && num <= 15;
+                })
+                .validate('body.file_paths', v => _.isUndefined(v) || _.isArray(v))
+                .validate('body.filePaths', v => _.isUndefined(v) || _.isArray(v))
+                .validate('body.response_format', v => _.isUndefined(v) || _.isString(v))
+                .validate('headers.authorization', _.isString);
+
+            const tokens = tokenSplit(request.headers.authorization);
+            const token = _.sample(tokens);
+            const {
+                model,
+                prompt = '',
+                ratio = '4:3',
+                resolution = '720p',
+                duration = 4,
+                file_paths = [],
+                filePaths = [],
+                response_format = 'url'
+            } = request.body;
+
+            const finalDuration = isMultiPart && typeof duration === 'string' ? parseInt(duration) : duration;
+            const finalFilePaths = filePaths.length > 0 ? filePaths : file_paths;
+            if (!hasKeyedFiles && !hasKeyedUrlFields && finalFilePaths.length === 0) {
+                throw new Error('国际接口至少需要一个素材：keyed multipart 文件、keyed URL 字段或 file_paths/filePaths');
+            }
+
+            const videoUrl = await generateInternationalSeedanceVideo(
+                model,
+                prompt,
+                {
+                    ratio,
+                    resolution,
+                    duration: finalDuration,
+                    filePaths: finalFilePaths,
+                    filesMap: request.filesMap,
+                    body: request.body,
+                },
+                token
+            );
+
+            if (response_format === 'b64_json') {
+                const videoBase64 = await util.fetchFileBASE64(videoUrl);
+                return {
+                    created: util.unixTimestamp(),
+                    data: [{ b64_json: videoBase64, revised_prompt: prompt }]
+                };
+            }
+
+            return {
+                created: util.unixTimestamp(),
+                data: [{ url: videoUrl, revised_prompt: prompt }]
+            };
+        },
+
+        // ========== 国际版异步视频生成接口：提交任务 ==========
+        '/international/generations/async': async (request: Request) => {
+            const contentType = request.headers['content-type'] || '';
+            const isMultiPart = contentType.startsWith('multipart/form-data');
+            const allowedModels = ['seedance-2.0-fast', 'seedance-2.0-pro', 'jimeng-video-seedance-2.0-fast', 'jimeng-video-seedance-2.0'];
+            const hasKeyedUrlFields = Object.keys(request.body || {}).some(key => (
+                key === 'image_file' || key === 'video_file' || key.startsWith('image_file_') || key.startsWith('video_file_')
+            ) && _.isString(request.body[key]));
+            const hasKeyedFiles = Object.keys(request.filesMap || {}).some(key =>
+                key === 'image_file' || key === 'video_file' || key.startsWith('image_file_') || key.startsWith('video_file_')
+            );
+
+            request
+                .validate('body.model', v => _.isString(v) && allowedModels.includes(v))
+                .validate('body.prompt', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.ratio', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.resolution', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.duration', v => {
+                    if (_.isUndefined(v)) return true;
+                    const num = isMultiPart && typeof v === 'string' ? parseInt(v) : v;
+                    return _.isFinite(num) && Number.isInteger(Number(num)) && num >= 4 && num <= 15;
+                })
+                .validate('body.file_paths', v => _.isUndefined(v) || _.isArray(v))
+                .validate('body.filePaths', v => _.isUndefined(v) || _.isArray(v))
+                .validate('headers.authorization', _.isString);
+
+            const tokens = tokenSplit(request.headers.authorization);
+            const token = _.sample(tokens);
+            const {
+                model,
+                prompt = '',
+                ratio = '4:3',
+                resolution = '720p',
+                duration = 4,
+                file_paths = [],
+                filePaths = [],
+            } = request.body;
+
+            const finalDuration = isMultiPart && typeof duration === 'string' ? parseInt(duration) : duration;
+            const finalFilePaths = filePaths.length > 0 ? filePaths : file_paths;
+            if (!hasKeyedFiles && !hasKeyedUrlFields && finalFilePaths.length === 0) {
+                throw new Error('国际接口至少需要一个素材：keyed multipart 文件、keyed URL 字段或 file_paths/filePaths');
+            }
+
+            // 提交国际版异步任务，立即返回 taskId
+            const taskId = submitInternationalAsyncVideoTask(
+                model,
+                prompt,
+                {
+                    ratio,
+                    resolution,
+                    duration: finalDuration,
+                    filePaths: finalFilePaths,
+                    filesMap: request.filesMap,
+                    body: request.body,
+                },
+                token
+            );
+
+            return {
+                created: util.unixTimestamp(),
+                task_id: taskId,
+                status: "processing",
+                message: "任务已提交，请使用 GET /v1/videos/international/generations/async/{task_id} 查询结果",
+            };
+        },
+
         '/generations/async': async (request: Request) => {
             const contentType = request.headers['content-type'] || '';
             const isMultiPart = contentType.startsWith('multipart/form-data');
@@ -197,6 +339,42 @@ export default {
     },
 
     get: {
+
+        // ========== 国际版异步视频生成接口：查询结果 ==========
+        '/international/generations/async/:taskId': async (request: Request) => {
+            const { taskId } = request.params;
+            if (!taskId) {
+                throw new Error("缺少 task_id 参数");
+            }
+
+            const task = await queryAsyncVideoTask(taskId);
+
+            if (task.status === "succeeded") {
+                return {
+                    created: util.unixTimestamp(),
+                    task_id: task.taskId,
+                    status: "succeeded",
+                    data: [{
+                        url: task.result.url,
+                        revised_prompt: task.result.revised_prompt,
+                    }],
+                };
+            } else if (task.status === "failed") {
+                return {
+                    created: util.unixTimestamp(),
+                    task_id: task.taskId,
+                    status: "failed",
+                    error: task.error,
+                };
+            } else {
+                return {
+                    created: util.unixTimestamp(),
+                    task_id: task.taskId,
+                    status: task.status,
+                    message: "任务处理中",
+                };
+            }
+        },
 
         // ========== 异步视频生成接口：查询结果 ==========
         '/generations/async/:taskId': async (request: Request) => {

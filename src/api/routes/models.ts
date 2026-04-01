@@ -119,7 +119,7 @@ export default {
                         "id": "jimeng-video-seedance-2.0",
                         "object": "model",
                         "owned_by": "jimeng-free-api",
-                        "description": "Seedance 2.0 多图智能视频生成模型（上游标准名称，支持4-15秒，多张图片混合生成视频）"
+                        "description": "Seedance 2.0 多图智能视频生成模型（国内兼容接口可用；国际 token hk-/jp-/sg- 建议走 /v1/videos/international/generations）"
                     },
                     {
                         "id": "seedance-2.0",
@@ -137,7 +137,7 @@ export default {
                         "id": "jimeng-video-seedance-2.0-fast",
                         "object": "model",
                         "owned_by": "jimeng-free-api",
-                        "description": "Seedance 2.0-fast 快速多图智能视频生成模型（上游标准名称，支持4-15秒）"
+                        "description": "Seedance 2.0-fast 快速多图智能视频生成模型（国内兼容接口可用；国际 token hk-/jp-/sg- 建议走 /v1/videos/international/generations）"
                     },
                     {
                         "id": "seedance-2.0-fast",
