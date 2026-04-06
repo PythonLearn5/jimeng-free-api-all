@@ -559,6 +559,7 @@ export async function uploadFile(
  */
 export function checkResult(result: AxiosResponse) {
   const { ret, errmsg, data } = result.data;
+  if (ret === '' && errmsg === '') return data ?? result.data;
   if (!_.isFinite(Number(ret))) return result.data;
   if (ret === '0') return data;
   if (ret === '5000')

@@ -3,7 +3,7 @@ import _ from 'lodash';
 import Request from '@/lib/request/Request.ts';
 import Response from '@/lib/response/Response.ts';
 import { tokenSplit } from '@/api/controllers/core.ts';
-import { generateVideo, generateSeedanceVideo, generateInternationalSeedanceVideo, isSeedanceModel, isInternationalSeedanceModel, DEFAULT_MODEL, submitAsyncVideoTask, queryAsyncVideoTask, submitInternationalAsyncVideoTask } from '@/api/controllers/videos.ts';
+import { generateVideo, generateSeedanceVideo, generateInternationalVideo, generateInternationalSeedanceVideo, isSeedanceModel, isInternationalSeedanceModel, isInternationalVideoModel, DEFAULT_MODEL, submitAsyncVideoTask, queryAsyncVideoTask, submitInternationalAsyncVideoTask } from '@/api/controllers/videos.ts';
 import util from '@/lib/util.ts';
 
 export default {
@@ -134,7 +134,10 @@ export default {
         '/international/generations': async (request: Request) => {
             const contentType = request.headers['content-type'] || '';
             const isMultiPart = contentType.startsWith('multipart/form-data');
-            const allowedModels = ['seedance-2.0-fast', 'seedance-2.0-pro', 'jimeng-video-seedance-2.0-fast', 'jimeng-video-seedance-2.0', 'jimeng-video-seedance-2.0-fast-vip', 'seedance-2.0-fast-vip', 'jimeng-video-seedance-2.0-vip', 'seedance-2.0-vip'];
+            const allowedModels = [
+                'seedance-2.0-fast', 'seedance-2.0-pro', 'jimeng-video-seedance-2.0-fast', 'jimeng-video-seedance-2.0', 'jimeng-video-seedance-2.0-fast-vip', 'seedance-2.0-fast-vip', 'jimeng-video-seedance-2.0-vip', 'seedance-2.0-vip',
+                'jimeng-video-3.5-pro', 'jimeng-video-3.0', 'jimeng-video-3.0-pro'
+            ];
             const hasKeyedUrlFields = Object.keys(request.body || {}).some(key => (
                 key === 'image_file' || key === 'video_file' || key.startsWith('image_file_') || key.startsWith('video_file_')
             ) && _.isString(request.body[key]));
@@ -147,11 +150,6 @@ export default {
                 .validate('body.prompt', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.ratio', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.resolution', v => _.isUndefined(v) || _.isString(v))
-                .validate('body.duration', v => {
-                    if (_.isUndefined(v)) return true;
-                    const num = isMultiPart && typeof v === 'string' ? parseInt(v) : v;
-                    return _.isFinite(num) && Number.isInteger(Number(num)) && num >= 4 && num <= 15;
-                })
                 .validate('body.file_paths', v => _.isUndefined(v) || _.isArray(v))
                 .validate('body.filePaths', v => _.isUndefined(v) || _.isArray(v))
                 .validate('body.response_format', v => _.isUndefined(v) || _.isString(v))
@@ -162,33 +160,70 @@ export default {
             const {
                 model,
                 prompt = '',
-                ratio = '4:3',
+                ratio,
                 resolution = '720p',
-                duration = 4,
+                duration,
                 file_paths = [],
                 filePaths = [],
                 response_format = 'url'
             } = request.body;
 
-            const finalDuration = isMultiPart && typeof duration === 'string' ? parseInt(duration) : duration;
+            const isSeedance = isInternationalSeedanceModel(model);
+            const finalDuration = _.isUndefined(duration)
+                ? (isSeedance ? 4 : 5)
+                : (isMultiPart && typeof duration === 'string' ? parseInt(duration) : duration);
+            const finalRatio = _.isUndefined(ratio)
+                ? (isSeedance ? '4:3' : '1:1')
+                : ratio;
             const finalFilePaths = filePaths.length > 0 ? filePaths : file_paths;
-            if (!hasKeyedFiles && !hasKeyedUrlFields && finalFilePaths.length === 0) {
-                throw new Error('国际接口至少需要一个素材：keyed multipart 文件、keyed URL 字段或 file_paths/filePaths');
+
+            if (!_.isFinite(finalDuration) || !Number.isInteger(Number(finalDuration))) {
+                throw new Error('duration 参数无效');
+            }
+            if (isSeedance) {
+                if (finalDuration < 4 || finalDuration > 15) {
+                    throw new Error('国际 Seedance 模型 duration 仅支持 4-15 秒');
+                }
+                if (!hasKeyedFiles && !hasKeyedUrlFields && finalFilePaths.length === 0) {
+                    throw new Error('国际 Seedance 接口至少需要一个素材：keyed multipart 文件、keyed URL 字段或 file_paths/filePaths');
+                }
+            } else {
+                if (finalDuration !== 5 && finalDuration !== 10) {
+                    throw new Error('国际普通视频模型 duration 仅支持 5 或 10 秒');
+                }
             }
 
-            const videoUrl = await generateInternationalSeedanceVideo(
-                model,
-                prompt,
-                {
-                    ratio,
-                    resolution,
-                    duration: finalDuration,
-                    filePaths: finalFilePaths,
-                    filesMap: request.filesMap,
-                    body: request.body,
-                },
-                token
-            );
+            let videoUrl: string;
+            if (isSeedance) {
+                videoUrl = await generateInternationalSeedanceVideo(
+                    model,
+                    prompt,
+                    {
+                        ratio: finalRatio,
+                        resolution,
+                        duration: finalDuration,
+                        filePaths: finalFilePaths,
+                        filesMap: request.filesMap,
+                        body: request.body,
+                    },
+                    token
+                );
+            } else if (isInternationalVideoModel(model)) {
+                videoUrl = await generateInternationalVideo(
+                    model,
+                    prompt,
+                    {
+                        ratio: finalRatio,
+                        resolution,
+                        duration: finalDuration,
+                        filePaths: finalFilePaths,
+                        files: request.files,
+                    },
+                    token
+                );
+            } else {
+                throw new Error(`国际接口暂不支持模型: ${model}`);
+            }
 
             if (response_format === 'b64_json') {
                 const videoBase64 = await util.fetchFileBASE64(videoUrl);
@@ -208,7 +243,10 @@ export default {
         '/international/generations/async': async (request: Request) => {
             const contentType = request.headers['content-type'] || '';
             const isMultiPart = contentType.startsWith('multipart/form-data');
-            const allowedModels = ['seedance-2.0-fast', 'seedance-2.0-pro', 'jimeng-video-seedance-2.0-fast', 'jimeng-video-seedance-2.0', 'jimeng-video-seedance-2.0-fast-vip', 'seedance-2.0-fast-vip', 'jimeng-video-seedance-2.0-vip', 'seedance-2.0-vip'];
+            const allowedModels = [
+                'seedance-2.0-fast', 'seedance-2.0-pro', 'jimeng-video-seedance-2.0-fast', 'jimeng-video-seedance-2.0', 'jimeng-video-seedance-2.0-fast-vip', 'seedance-2.0-fast-vip', 'jimeng-video-seedance-2.0-vip', 'seedance-2.0-vip',
+                'jimeng-video-3.5-pro', 'jimeng-video-3.0', 'jimeng-video-3.0-pro'
+            ];
             const hasKeyedUrlFields = Object.keys(request.body || {}).some(key => (
                 key === 'image_file' || key === 'video_file' || key.startsWith('image_file_') || key.startsWith('video_file_')
             ) && _.isString(request.body[key]));
@@ -221,11 +259,6 @@ export default {
                 .validate('body.prompt', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.ratio', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.resolution', v => _.isUndefined(v) || _.isString(v))
-                .validate('body.duration', v => {
-                    if (_.isUndefined(v)) return true;
-                    const num = isMultiPart && typeof v === 'string' ? parseInt(v) : v;
-                    return _.isFinite(num) && Number.isInteger(Number(num)) && num >= 4 && num <= 15;
-                })
                 .validate('body.file_paths', v => _.isUndefined(v) || _.isArray(v))
                 .validate('body.filePaths', v => _.isUndefined(v) || _.isArray(v))
                 .validate('headers.authorization', _.isString);
@@ -235,28 +268,49 @@ export default {
             const {
                 model,
                 prompt = '',
-                ratio = '4:3',
+                ratio,
                 resolution = '720p',
-                duration = 4,
+                duration,
                 file_paths = [],
                 filePaths = [],
             } = request.body;
 
-            const finalDuration = isMultiPart && typeof duration === 'string' ? parseInt(duration) : duration;
+            const isSeedance = isInternationalSeedanceModel(model);
+            const finalDuration = _.isUndefined(duration)
+                ? (isSeedance ? 4 : 5)
+                : (isMultiPart && typeof duration === 'string' ? parseInt(duration) : duration);
+            const finalRatio = _.isUndefined(ratio)
+                ? (isSeedance ? '4:3' : '1:1')
+                : ratio;
             const finalFilePaths = filePaths.length > 0 ? filePaths : file_paths;
-            if (!hasKeyedFiles && !hasKeyedUrlFields && finalFilePaths.length === 0) {
-                throw new Error('国际接口至少需要一个素材：keyed multipart 文件、keyed URL 字段或 file_paths/filePaths');
+
+            if (!_.isFinite(finalDuration) || !Number.isInteger(Number(finalDuration))) {
+                throw new Error('duration 参数无效');
+            }
+            if (isSeedance) {
+                if (finalDuration < 4 || finalDuration > 15) {
+                    throw new Error('国际 Seedance 模型 duration 仅支持 4-15 秒');
+                }
+                if (!hasKeyedFiles && !hasKeyedUrlFields && finalFilePaths.length === 0) {
+                    throw new Error('国际 Seedance 接口至少需要一个素材：keyed multipart 文件、keyed URL 字段或 file_paths/filePaths');
+                }
+            } else if (isInternationalVideoModel(model)) {
+                if (finalDuration !== 5 && finalDuration !== 10) {
+                    throw new Error('国际普通视频模型 duration 仅支持 5 或 10 秒');
+                }
+            } else {
+                throw new Error(`国际接口暂不支持模型: ${model}`);
             }
 
-            // 提交国际版异步任务，立即返回 taskId
             const taskId = submitInternationalAsyncVideoTask(
                 model,
                 prompt,
                 {
-                    ratio,
+                    ratio: finalRatio,
                     resolution,
                     duration: finalDuration,
                     filePaths: finalFilePaths,
+                    files: request.files,
                     filesMap: request.filesMap,
                     body: request.body,
                 },

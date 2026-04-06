@@ -38,3 +38,5 @@ hk-tokens.json
 .omc/
 # Claude local settings
 .claude/
+docs/international-seedance-design.md
+tmp/async-tasks/8e6526a0-31a3-11f1-8a87-e5ec8e5c680e.json
